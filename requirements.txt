@@ -1,9 +1,2 @@
-setuptools>=65.0.0
-fastapi==0.111.0
-uvicorn[standard]==0.30.1
-openai-whisper==20231117
-python-multipart==0.0.9
-pydantic==2.7.1
-numpy==1.26.4
-torch==2.3.0+cpu
-torchaudio==2.3.0+cpu
+# Dependencies installed directly in Dockerfile
+# See Dockerfile for pinned versions

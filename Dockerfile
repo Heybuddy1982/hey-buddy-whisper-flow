@@ -24,4 +24,6 @@ COPY main.py .
 RUN python -c "import whisper; whisper.load_model('base')"
 
 EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+COPY start.sh .
+RUN chmod +x start.sh
+CMD ["/bin/bash", "start.sh"]

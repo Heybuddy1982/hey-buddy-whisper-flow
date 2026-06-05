@@ -1,2 +1,0 @@
-# Dependencies installed directly in Dockerfile
-# See Dockerfile for pinned versions

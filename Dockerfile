@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# Cache bust: 2026-06-05
+# Cache bust: 2026-06-09
 RUN apt-get update && apt-get install -y ffmpeg git && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -21,7 +21,7 @@ RUN pip install --no-cache-dir openai-whisper
 COPY main.py .
 
 # Step 6: Pre-download model
-RUN python -c "import whisper; whisper.load_model('base')"
+RUN python -c "import whisper; whisper.load_model('base.en'); whisper.load_model('tiny.en')"
 
 EXPOSE 8000
 COPY start.sh .

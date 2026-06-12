@@ -42,7 +42,7 @@ app.add_middleware(
 )
 
 # Load model once at startup
-MODEL_SIZE = os.getenv("WHISPER_MODEL", "base")
+MODEL_SIZE = os.getenv("WHISPER_MODEL", "base.en")
 logger.info(f"Loading Whisper model: {MODEL_SIZE}")
 model = whisper.load_model(MODEL_SIZE)
 logger.info("Whisper model loaded")
@@ -107,11 +107,13 @@ async def transcribe(
             tmp.write(audio_bytes)
             tmp.flush()
 
-            # Transcribe — language detection + transcription in one pass
+            # Transcribe — English forced (app is English-only; auto-detect
+            # doubles CPU time), greedy deterministic decode for speed
             result = model.transcribe(
                 tmp.name,
-                language=None,          # auto-detect
+                language="en",
                 task="transcribe",
+                temperature=0.0,        # greedy, deterministic, fast
                 fp16=False,             # CPU-safe
                 verbose=False,          # no stdout transcript logging
                 condition_on_previous_text=False,  # stateless per request

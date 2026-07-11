@@ -1,28 +1,34 @@
 """
-HEY BUDDY — Self-Hosted Whisper STT Server
+HEY BUDDY — Self-Hosted Whisper STT Server (faster-whisper)
 
 Governance rules enforced here:
 - Audio received, transcribed, and DESTROYED in the same request
-- No audio written to disk at any point
+- No audio written to disk at any point (in-memory decode only)
 - No logging of audio content or transcripts
 - Transcript TTL: exists only in the HTTP response — not stored
 - No PII attached to session IDs
 - Error state destroys all in-progress data
 
-Deploy: Railway or Fly.io
-Model: whisper base (MVP) — swap to small if accuracy insufficient
+LATENCY NOTE (2026-07-11): This replaced vanilla openai-whisper, which on
+Railway's shared CPU took 10-20s per clip — the "~10-20s wait after the
+user stops speaking" bug lived entirely here, not in the app. faster-whisper
+runs the same base.en model through CTranslate2 int8: ~4-8x faster on CPU,
+no PyTorch dependency. Same API contract — the app needs no changes.
+
+Deploy: Railway
+Model: base.en int8 (env WHISPER_MODEL to swap; tiny.en pre-baked as the
+fast fallback if base is still too slow on this instance)
 """
 
 import os
 import io
 import gc
-import tempfile
+import time
 import logging
 from fastapi import FastAPI, File, UploadFile, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import whisper
-import numpy as np
+from faster_whisper import WhisperModel
 
 # Minimal logging — no transcript content ever logged
 logging.basicConfig(level=logging.INFO)
@@ -41,11 +47,13 @@ app.add_middleware(
     allow_headers=["Content-Type", "X-Session-ID", "X-Hey-Buddy-Key"],
 )
 
-# Load model once at startup
+# Load model once at startup. int8 quantization: same accuracy class,
+# fraction of the CPU time. Use every core the instance gives us.
 MODEL_SIZE = os.getenv("WHISPER_MODEL", "base.en")
-logger.info(f"Loading Whisper model: {MODEL_SIZE}")
-model = whisper.load_model(MODEL_SIZE)
-logger.info("Whisper model loaded")
+CPU_THREADS = int(os.getenv("WHISPER_THREADS", str(os.cpu_count() or 2)))
+logger.info(f"Loading faster-whisper model: {MODEL_SIZE} (int8, {CPU_THREADS} threads)")
+model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8", cpu_threads=CPU_THREADS)
+logger.info("Model loaded")
 
 # Simple API key check — set HB_API_KEY env var in Railway
 API_KEY = os.getenv("HB_API_KEY", "")
@@ -56,6 +64,9 @@ class TranscriptResponse(BaseModel):
     language: str
     session_id: str
     audio_destroyed: bool = True
+    # Server-side transcription time — lets us diagnose latency from the
+    # phone next time without needing the Railway metrics dashboard.
+    processing_ms: int = 0
 
 
 class HealthResponse(BaseModel):
@@ -78,7 +89,6 @@ async def transcribe(
     if API_KEY and x_hey_buddy_key != API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    # Validate content type
     if audio.content_type not in (
         "audio/webm", "audio/ogg", "audio/wav", "audio/mp4",
         "audio/mpeg", "audio/flac", "application/octet-stream"
@@ -88,6 +98,7 @@ async def transcribe(
     audio_bytes = None
     transcript_text = ""
     detected_language = "en"
+    elapsed_ms = 0
 
     try:
         # Read audio entirely into memory — never touch disk
@@ -99,35 +110,34 @@ async def transcribe(
         if len(audio_bytes) > 10 * 1024 * 1024:  # 10MB max
             raise HTTPException(status_code=413, detail="Audio too large")
 
-        # Write to a temp file in /tmp (RAM-backed on most cloud providers)
-        # Deleted immediately after transcription
-        with tempfile.NamedTemporaryFile(
-            suffix=".webm", dir="/tmp", delete=True
-        ) as tmp:
-            tmp.write(audio_bytes)
-            tmp.flush()
+        # Decode + transcribe fully in memory (PyAV) — no temp file at all,
+        # which is stricter than the old /tmp approach. English forced,
+        # greedy decode, built-in VAD skips the trailing silence the app's
+        # recorder always captures before it stops.
+        t0 = time.monotonic()
+        segments, info = model.transcribe(
+            io.BytesIO(audio_bytes),
+            language="en",
+            task="transcribe",
+            beam_size=1,             # greedy, deterministic, fast
+            temperature=0.0,
+            condition_on_previous_text=False,  # stateless per request
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 300},
+            no_speech_threshold=0.6,
+            log_prob_threshold=-1.0,
+            compression_ratio_threshold=2.4,
+        )
+        # segments is a generator — joining consumes it and finishes the work
+        transcript_text = " ".join(s.text.strip() for s in segments).strip()
+        detected_language = getattr(info, "language", "en") or "en"
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
 
-            # Transcribe — English forced (app is English-only; auto-detect
-            # doubles CPU time), greedy deterministic decode for speed
-            result = model.transcribe(
-                tmp.name,
-                language="en",
-                task="transcribe",
-                temperature=0.0,        # greedy, deterministic, fast
-                fp16=False,             # CPU-safe
-                verbose=False,          # no stdout transcript logging
-                condition_on_previous_text=False,  # stateless per request
-                no_speech_threshold=0.6,
-                logprob_threshold=-1.0,
-                compression_ratio_threshold=2.4,
-            )
-
-            transcript_text = (result.get("text") or "").strip()
-            detected_language = result.get("language") or "en"
-
-        # tmp file is deleted by context manager above
-        # Log session ID only — never log transcript content
-        logger.info(f"Transcribed session={x_session_id[:8]}... lang={detected_language} chars={len(transcript_text)}")
+        # Log session ID + timing only — never log transcript content
+        logger.info(
+            f"Transcribed session={x_session_id[:8]}... lang={detected_language} "
+            f"chars={len(transcript_text)} ms={elapsed_ms}"
+        )
 
     except HTTPException:
         raise
@@ -145,4 +155,5 @@ async def transcribe(
         language=detected_language,
         session_id=x_session_id,
         audio_destroyed=True,
+        processing_ms=elapsed_ms,
     )

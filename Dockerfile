@@ -1,27 +1,22 @@
 FROM python:3.11-slim
 
-# Cache bust: 2026-06-09
-RUN apt-get update && apt-get install -y ffmpeg git && rm -rf /var/lib/apt/lists/*
+# Cache bust: 2026-07-11 — faster-whisper rewrite
+# No PyTorch, no openai-whisper, no apt ffmpeg (PyAV wheels bundle FFmpeg).
+# Image drops from multi-GB to a few hundred MB — faster Railway builds,
+# faster restarts, less RAM.
 
 WORKDIR /app
 
-# Step 1: Fix pkg_resources before anything else
-RUN pip install --upgrade pip setuptools wheel
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Step 2: CPU-only PyTorch
-RUN pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir fastapi "uvicorn[standard]" python-multipart pydantic faster-whisper
 
-# Step 3: App dependencies
-RUN pip install --no-cache-dir fastapi "uvicorn[standard]" python-multipart pydantic numpy
-
-# Step 4: Whisper
-RUN pip install --no-cache-dir openai-whisper
-
-# Step 5: Copy app
 COPY main.py .
 
-# Step 6: Pre-download model
-RUN python -c "import whisper; whisper.load_model('base.en'); whisper.load_model('tiny.en')"
+# Pre-download models into the image so the first request never pays the
+# model fetch. base.en is the default; tiny.en baked in as the fast
+# fallback (swap via WHISPER_MODEL env var, no rebuild needed).
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('base.en', device='cpu', compute_type='int8'); WhisperModel('tiny.en', device='cpu', compute_type='int8')"
 
 EXPOSE 8000
 COPY start.sh .

@@ -69,14 +69,18 @@ class TranscriptResponse(BaseModel):
     processing_ms: int = 0
 
 
+SERVER_VERSION = "fw-2026-07-11"  # bump on every deploy-relevant change
+
+
 class HealthResponse(BaseModel):
     status: str
     model: str
+    version: str
 
 
 @app.get("/health", response_model=HealthResponse)
 def health():
-    return HealthResponse(status="ok", model=MODEL_SIZE)
+    return HealthResponse(status="ok", model=MODEL_SIZE, version=SERVER_VERSION)
 
 
 @app.post("/transcribe", response_model=TranscriptResponse)

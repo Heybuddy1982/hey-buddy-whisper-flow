@@ -25,6 +25,7 @@ import io
 import gc
 import time
 import logging
+import threading
 from fastapi import FastAPI, File, UploadFile, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -47,13 +48,35 @@ app.add_middleware(
     allow_headers=["Content-Type", "X-Session-ID", "X-Hey-Buddy-Key"],
 )
 
-# Load model once at startup. int8 quantization: same accuracy class,
-# fraction of the CPU time. Use every core the instance gives us.
+# CRASH-PROOF STARTUP (added after a silent Railway crash-loop caused a
+# 502 that the app experienced as 'it doesn't listen'). The web server
+# ALWAYS binds and /health ALWAYS answers; the model loads in a
+# background thread. If loading fails, /health reports the exact error
+# instead of the whole container dying. A safety product's server must
+# fail loudly and observably, never silently.
 MODEL_SIZE = os.getenv("WHISPER_MODEL", "base.en")
 CPU_THREADS = int(os.getenv("WHISPER_THREADS", str(os.cpu_count() or 2)))
-logger.info(f"Loading faster-whisper model: {MODEL_SIZE} (int8, {CPU_THREADS} threads)")
-model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8", cpu_threads=CPU_THREADS)
-logger.info("Model loaded")
+
+model = None
+model_state = "loading"   # loading | ready | error
+model_error = ""
+
+
+def _load_model():
+    global model, model_state, model_error
+    try:
+        logger.info(f"Loading faster-whisper model: {MODEL_SIZE} (int8, {CPU_THREADS} threads)")
+        m = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8", cpu_threads=CPU_THREADS)
+        model = m
+        model_state = "ready"
+        logger.info("Model loaded")
+    except Exception as e:
+        model_state = "error"
+        model_error = f"{type(e).__name__}: {e}"
+        logger.error(f"MODEL LOAD FAILED: {model_error}")
+
+
+threading.Thread(target=_load_model, daemon=True).start()
 
 # Simple API key check — set HB_API_KEY env var in Railway
 API_KEY = os.getenv("HB_API_KEY", "")
@@ -76,11 +99,21 @@ class HealthResponse(BaseModel):
     status: str
     model: str
     version: str
+    model_state: str
+    model_error: str = ""
 
 
 @app.get("/health", response_model=HealthResponse)
 def health():
-    return HealthResponse(status="ok", model=MODEL_SIZE, version=SERVER_VERSION)
+    # status stays "ok" whenever the web server is up — Railway's deploy
+    # healthcheck keys off a 200 here. model_state tells the real story.
+    return HealthResponse(
+        status="ok",
+        model=MODEL_SIZE,
+        version=SERVER_VERSION,
+        model_state=model_state,
+        model_error=model_error,
+    )
 
 
 @app.post("/transcribe", response_model=TranscriptResponse)
@@ -92,6 +125,11 @@ async def transcribe(
     # API key check
     if API_KEY and x_hey_buddy_key != API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Model not up yet (or failed) — tell the app plainly instead of
+    # hanging. The app's onError path speaks to the user within ~1s.
+    if model_state != "ready":
+        raise HTTPException(status_code=503, detail=f"Model {model_state}")
 
     if audio.content_type not in (
         "audio/webm", "audio/ogg", "audio/wav", "audio/mp4",

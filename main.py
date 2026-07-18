@@ -96,7 +96,7 @@ class TranscriptResponse(BaseModel):
     processing_ms: int = 0
 
 
-SERVER_VERSION = "fw-2026-07-17"  # bump on every deploy-relevant change
+SERVER_VERSION = "fw-2026-07-18"  # bump on every deploy-relevant change
 
 
 class HealthResponse(BaseModel):
@@ -150,8 +150,17 @@ async def transcribe(
         # Read audio entirely into memory — never touch disk
         audio_bytes = await audio.read()
 
+        # Diagnostic: size + container type only — never content.
+        logger.info(
+            f"RX session={x_session_id[:8]}... bytes={len(audio_bytes)} "
+            f"type={audio.content_type} name={audio.filename}"
+        )
+
         if len(audio_bytes) < 100:
-            raise HTTPException(status_code=400, detail="Audio too short")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Audio too short ({len(audio_bytes)} bytes)",
+            )
 
         if len(audio_bytes) > 10 * 1024 * 1024:  # 10MB max
             raise HTTPException(status_code=413, detail="Audio too large")

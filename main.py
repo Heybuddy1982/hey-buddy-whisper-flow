@@ -29,7 +29,10 @@ import threading
 from fastapi import FastAPI, File, UploadFile, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from faster_whisper import WhisperModel
+# NOTE: faster_whisper is imported inside _load_model on purpose — if a
+# native dependency is broken (e.g. missing libgomp), a top-level import
+# kills uvicorn before it binds and Railway shows an unexplained 502.
+# Importing in the loader keeps /health alive to report the real error.
 
 # Minimal logging — no transcript content ever logged
 logging.basicConfig(level=logging.INFO)
@@ -65,6 +68,7 @@ model_error = ""
 def _load_model():
     global model, model_state, model_error
     try:
+        from faster_whisper import WhisperModel
         logger.info(f"Loading faster-whisper model: {MODEL_SIZE} (int8, {CPU_THREADS} threads)")
         m = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8", cpu_threads=CPU_THREADS)
         model = m
@@ -92,7 +96,7 @@ class TranscriptResponse(BaseModel):
     processing_ms: int = 0
 
 
-SERVER_VERSION = "fw-2026-07-11"  # bump on every deploy-relevant change
+SERVER_VERSION = "fw-2026-07-17"  # bump on every deploy-relevant change
 
 
 class HealthResponse(BaseModel):

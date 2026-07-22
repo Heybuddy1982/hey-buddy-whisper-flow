@@ -96,7 +96,34 @@ class TranscriptResponse(BaseModel):
     processing_ms: int = 0
 
 
-SERVER_VERSION = "fw-2026-07-18"  # bump on every deploy-relevant change
+SERVER_VERSION = "fw-2026-07-21"  # bump on every deploy-relevant change
+
+
+# ------------------------------------------------------------------
+# DEBUG RING BUFFER — phone-readable request history at /debug/recent.
+# Metadata ONLY: sizes, statuses, timings, character counts. Never
+# audio, never transcript content (store-nothing rule). Exists so a
+# founder on a phone can see what actually arrived without the
+# Railway dashboard. In-memory, capped, gone on restart.
+# ------------------------------------------------------------------
+from collections import deque
+from datetime import datetime, timezone
+
+RECENT: deque = deque(maxlen=30)
+
+
+def record_rx(session: str, nbytes: int, ctype: str, status: str,
+              transcript_chars: int = -1, ms: int = -1, err: str = ""):
+    RECENT.appendleft({
+        "at": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+        "session": (session or "anonymous")[:8],
+        "bytes": nbytes,
+        "type": ctype or "",
+        "status": status,
+        "transcript_chars": transcript_chars,
+        "ms": ms,
+        "error": err,
+    })
 
 
 class HealthResponse(BaseModel):
@@ -120,6 +147,13 @@ def health():
     )
 
 
+@app.get("/debug/recent")
+def debug_recent():
+    """Last 30 transcribe attempts, newest first. Metadata only."""
+    return {"version": SERVER_VERSION, "model_state": model_state,
+            "requests": list(RECENT)}
+
+
 @app.post("/transcribe", response_model=TranscriptResponse)
 async def transcribe(
     audio: UploadFile = File(...),
@@ -128,11 +162,13 @@ async def transcribe(
 ):
     # API key check
     if API_KEY and x_hey_buddy_key != API_KEY:
+        record_rx(x_session_id, -1, "", "401 bad key")
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     # Model not up yet (or failed) — tell the app plainly instead of
     # hanging. The app's onError path speaks to the user within ~1s.
     if model_state != "ready":
+        record_rx(x_session_id, -1, "", f"503 model {model_state}")
         raise HTTPException(status_code=503, detail=f"Model {model_state}")
 
     if audio.content_type not in (
@@ -157,6 +193,8 @@ async def transcribe(
         )
 
         if len(audio_bytes) < 100:
+            record_rx(x_session_id, len(audio_bytes), audio.content_type,
+                      "400 audio too short")
             raise HTTPException(
                 status_code=400,
                 detail=f"Audio too short ({len(audio_bytes)} bytes)",
@@ -193,11 +231,15 @@ async def transcribe(
             f"Transcribed session={x_session_id[:8]}... lang={detected_language} "
             f"chars={len(transcript_text)} ms={elapsed_ms}"
         )
+        record_rx(x_session_id, len(audio_bytes), audio.content_type,
+                  "200 ok", transcript_chars=len(transcript_text), ms=elapsed_ms)
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Transcription error session={x_session_id[:8]}...: {type(e).__name__}")
+        record_rx(x_session_id, len(audio_bytes) if audio_bytes else 0,
+                  audio.content_type, "500 error", err=type(e).__name__)
         raise HTTPException(status_code=500, detail="Transcription failed")
     finally:
         # Explicit destruction of audio bytes from memory

@@ -78,7 +78,12 @@ app.add_middleware(
 # always moved on before the answer arrived. tiny.en runs 3-5x
 # faster; with a keyword-driven classifier downstream, speed beats
 # marginal accuracy here. Override with WHISPER_MODEL env if needed.
-MODEL_SIZE = os.getenv("WHISPER_MODEL", "tiny.en")
+# PINNED for beta (2026-07-21): a leftover WHISPER_MODEL=base env var
+# on Railway silently overrode the tiny.en default — the second env
+# var today to steer production against the code's intent (see CORS).
+# During beta the code decides. Restore env override only with a
+# /health field that names the source of the value.
+MODEL_SIZE = "tiny.en"
 CPU_THREADS = int(os.getenv("WHISPER_THREADS", str(os.cpu_count() or 2)))
 
 model = None
@@ -126,7 +131,7 @@ class TranscriptResponse(BaseModel):
     processing_ms: int = 0
 
 
-SERVER_VERSION = "fw-2026-07-21c"  # bump on every deploy-relevant change
+SERVER_VERSION = "fw-2026-07-21d"  # bump on every deploy-relevant change
 
 
 # ------------------------------------------------------------------

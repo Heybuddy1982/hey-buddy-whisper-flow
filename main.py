@@ -73,7 +73,12 @@ app.add_middleware(
 # background thread. If loading fails, /health reports the exact error
 # instead of the whole container dying. A safety product's server must
 # fail loudly and observably, never silently.
-MODEL_SIZE = os.getenv("WHISPER_MODEL", "base.en")
+# tiny.en default (2026-07-21): /debug/recent showed 60-190s per
+# request on base.en under Railway's shared CPU — the session had
+# always moved on before the answer arrived. tiny.en runs 3-5x
+# faster; with a keyword-driven classifier downstream, speed beats
+# marginal accuracy here. Override with WHISPER_MODEL env if needed.
+MODEL_SIZE = os.getenv("WHISPER_MODEL", "tiny.en")
 CPU_THREADS = int(os.getenv("WHISPER_THREADS", str(os.cpu_count() or 2)))
 
 model = None
@@ -87,6 +92,15 @@ def _load_model():
         from faster_whisper import WhisperModel
         logger.info(f"Loading faster-whisper model: {MODEL_SIZE} (int8, {CPU_THREADS} threads)")
         m = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8", cpu_threads=CPU_THREADS)
+        # Warm-up inference: the first real request must not pay
+        # cold-path costs (kernel compilation, memory setup).
+        try:
+            import numpy as np
+            warm = np.zeros(16000, dtype=np.float32)  # 1s silence
+            list(m.transcribe(warm, language="en", beam_size=1)[0])
+            logger.info("Warm-up inference complete")
+        except Exception as we:
+            logger.warning(f"Warm-up skipped: {type(we).__name__}")
         model = m
         model_state = "ready"
         logger.info("Model loaded")
@@ -112,7 +126,7 @@ class TranscriptResponse(BaseModel):
     processing_ms: int = 0
 
 
-SERVER_VERSION = "fw-2026-07-21b"  # bump on every deploy-relevant change
+SERVER_VERSION = "fw-2026-07-21c"  # bump on every deploy-relevant change
 
 
 # ------------------------------------------------------------------

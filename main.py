@@ -84,6 +84,22 @@ app.add_middleware(
 # During beta the code decides. Restore env override only with a
 # /health field that names the source of the value.
 MODEL_SIZE = "tiny.en"
+
+# ------------------------------------------------------------------
+# STT GATEWAY (2026-07-22): primary = hosted fast Whisper (Groq
+# whisper-large-v3-turbo, ~300ms/utterance) when GROQ_API_KEY is set;
+# fallback = local faster-whisper. Field data showed 60-190s local
+# inference on shared CPU — unusable for a first-60-seconds product.
+# The app contract is unchanged; the key never leaves this server;
+# audio passes through transiently on both paths and is never stored.
+# Provider processing is flagged PENDING CGO REVIEW in the app repo's
+# DECISIONS.md. An unset key degrades to local — adding capability
+# via env is allowed, removing it silently is not.
+# ------------------------------------------------------------------
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+GROQ_MODEL = os.getenv("GROQ_STT_MODEL", "whisper-large-v3-turbo")
+GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+GROQ_TIMEOUT_S = float(os.getenv("GROQ_TIMEOUT_S", "8"))
 CPU_THREADS = int(os.getenv("WHISPER_THREADS", str(os.cpu_count() or 2)))
 
 model = None
@@ -131,7 +147,7 @@ class TranscriptResponse(BaseModel):
     processing_ms: int = 0
 
 
-SERVER_VERSION = "fw-2026-07-21d"  # bump on every deploy-relevant change
+SERVER_VERSION = "fw-2026-07-22a"  # bump on every deploy-relevant change
 
 
 # ------------------------------------------------------------------
@@ -189,6 +205,29 @@ def debug_recent():
             "requests": list(RECENT)}
 
 
+async def _transcribe_via_groq(audio_bytes: bytes, content_type: str) -> str | None:
+    """Returns transcript text, or None to signal fallback to local."""
+    if not GROQ_API_KEY:
+        return None
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=GROQ_TIMEOUT_S) as client:
+            resp = await client.post(
+                GROQ_URL,
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                files={"file": ("audio.webm", audio_bytes, content_type or "audio/webm")},
+                data={"model": GROQ_MODEL, "language": "en",
+                      "response_format": "json", "temperature": "0"},
+            )
+        if resp.status_code != 200:
+            logger.warning(f"Groq STT {resp.status_code} — falling back to local")
+            return None
+        return (resp.json().get("text") or "").strip()
+    except Exception as e:
+        logger.warning(f"Groq STT {type(e).__name__} — falling back to local")
+        return None
+
+
 @app.post("/transcribe", response_model=TranscriptResponse)
 async def transcribe(
     audio: UploadFile = File(...),
@@ -243,22 +282,31 @@ async def transcribe(
         # greedy decode, built-in VAD skips the trailing silence the app's
         # recorder always captures before it stops.
         t0 = time.monotonic()
-        segments, info = model.transcribe(
-            io.BytesIO(audio_bytes),
-            language="en",
-            task="transcribe",
-            beam_size=1,             # greedy, deterministic, fast
-            temperature=0.0,
-            condition_on_previous_text=False,  # stateless per request
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 300},
-            no_speech_threshold=0.6,
-            log_prob_threshold=-1.0,
-            compression_ratio_threshold=2.4,
-        )
-        # segments is a generator — joining consumes it and finishes the work
-        transcript_text = " ".join(s.text.strip() for s in segments).strip()
-        detected_language = getattr(info, "language", "en") or "en"
+        engine = "local"
+        groq_text = await _transcribe_via_groq(audio_bytes, audio.content_type or "")
+        if groq_text is not None:
+            engine = "groq"
+            transcript_text = groq_text
+            detected_language = "en"
+        else:
+            def _local_infer() -> str:
+                segs, _info = model.transcribe(
+                    io.BytesIO(audio_bytes),
+                    language="en",
+                    task="transcribe",
+                    beam_size=1,             # greedy, deterministic, fast
+                    temperature=0.0,
+                    condition_on_previous_text=False,  # stateless per request
+                    vad_filter=True,
+                    vad_parameters={"min_silence_duration_ms": 300},
+                    no_speech_threshold=0.6,
+                    log_prob_threshold=-1.0,
+                    compression_ratio_threshold=2.4,
+                )
+                return " ".join(seg.text.strip() for seg in segs).strip()
+            import asyncio
+            transcript_text = await asyncio.get_event_loop().run_in_executor(None, _local_infer)
+            detected_language = "en"
         elapsed_ms = int((time.monotonic() - t0) * 1000)
 
         # Log session ID + timing only — never log transcript content
@@ -267,7 +315,7 @@ async def transcribe(
             f"chars={len(transcript_text)} ms={elapsed_ms}"
         )
         record_rx(x_session_id, len(audio_bytes), audio.content_type,
-                  "200 ok", transcript_chars=len(transcript_text), ms=elapsed_ms)
+                  f"200 ok ({engine})", transcript_chars=len(transcript_text), ms=elapsed_ms)
 
     except HTTPException:
         raise

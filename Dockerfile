@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
 
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-RUN pip install --no-cache-dir fastapi "uvicorn[standard]" python-multipart pydantic faster-whisper
+RUN pip install --no-cache-dir fastapi "uvicorn[standard]" python-multipart pydantic faster-whisper httpx
 
 COPY main.py .
 

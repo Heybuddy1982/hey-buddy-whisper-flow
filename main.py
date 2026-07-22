@@ -40,8 +40,24 @@ logger = logging.getLogger("hey-buddy-whisper")
 
 app = FastAPI(title="Hey Buddy Whisper STT", docs_url=None, redoc_url=None)
 
-# CORS — restrict to your Vercel domain in production
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+# CORS — known app origins are ALWAYS allowed; the env var can only
+# ADD origins, never lock the app out. Field-diagnosed 2026-07-21:
+# ALLOWED_ORIGINS on Railway was set for an older domain, so the
+# browser blocked every request from the live app before sending —
+# /debug/recent stayed empty through six app deploys while the app
+# looked deaf. An env var must never be able to silently sever the
+# app from its own server.
+KNOWN_ORIGINS = [
+    "https://hey-buddy-canada.lovable.app",
+    "https://id-preview--4f4cac9c-9c01-4950-acfb-59e79cbb47ac.lovable.app",
+    "https://app.heybuddyapp.ca",
+    "http://localhost:5173",
+]
+_env_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+if "*" in _env_origins or not _env_origins:
+    ALLOWED_ORIGINS = ["*"]
+else:
+    ALLOWED_ORIGINS = sorted(set(KNOWN_ORIGINS + _env_origins))
 
 app.add_middleware(
     CORSMiddleware,
@@ -96,7 +112,7 @@ class TranscriptResponse(BaseModel):
     processing_ms: int = 0
 
 
-SERVER_VERSION = "fw-2026-07-21"  # bump on every deploy-relevant change
+SERVER_VERSION = "fw-2026-07-21b"  # bump on every deploy-relevant change
 
 
 # ------------------------------------------------------------------

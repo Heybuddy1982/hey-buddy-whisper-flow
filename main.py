@@ -134,7 +134,7 @@ def _load_model():
 threading.Thread(target=_load_model, daemon=True).start()
 
 # Simple API key check — set HB_API_KEY env var in Railway
-API_KEY = os.getenv("HB_API_KEY", "")
+API_KEY = os.getenv("HB_API_KEY", "").strip()  # strip: paste-safe, matches GROQ_API_KEY handling
 
 
 class TranscriptResponse(BaseModel):
@@ -147,7 +147,7 @@ class TranscriptResponse(BaseModel):
     processing_ms: int = 0
 
 
-SERVER_VERSION = "fw-2026-07-22a"  # bump on every deploy-relevant change
+SERVER_VERSION = "fw-2026-08-05a"  # bump on every deploy-relevant change
 
 
 # ------------------------------------------------------------------

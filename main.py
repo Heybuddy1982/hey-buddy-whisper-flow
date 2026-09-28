@@ -147,7 +147,7 @@ class TranscriptResponse(BaseModel):
     processing_ms: int = 0
 
 
-SERVER_VERSION = "fw-2026-08-05a"  # bump on every deploy-relevant change
+SERVER_VERSION = "fw-2026-09-28a"  # bump on every deploy-relevant change
 
 
 # ------------------------------------------------------------------
@@ -202,29 +202,83 @@ def health():
 def debug_recent():
     """Last 30 transcribe attempts, newest first. Metadata only."""
     return {"version": SERVER_VERSION, "model_state": model_state,
+            "groq_configured": bool(GROQ_API_KEY),
+            "last_groq_error": LAST_GROQ_ERROR,
             "requests": list(RECENT)}
+
+
+def _to_flac_16k_mono(audio_bytes: bytes) -> bytes | None:
+    """Re-encode any browser recording to 16 kHz mono FLAC, in memory.
+
+    GROQ 400 FIX (2026-09-28): field log 2026-09-24 showed Groq rejecting the
+    phone's raw MediaRecorder WebM with 400, forcing the local fallback
+    (18.4s on shared CPU). Browser WebM from MediaRecorder is streamed
+    without duration/cue metadata and its codec params vary by device.
+    16 kHz mono FLAC is Groq's documented preferred input: lossless for
+    speech, smaller upload, one predictable container for every phone.
+    PyAV ships with faster-whisper; no disk, no ffmpeg binary.
+    Returns None on any failure so the caller sends the original bytes.
+    """
+    try:
+        import av
+        out = io.BytesIO()
+        with av.open(io.BytesIO(audio_bytes)) as src:
+            in_stream = next(s for s in src.streams if s.type == "audio")
+            with av.open(out, mode="w", format="flac") as dst:
+                o = dst.add_stream("flac", rate=16000)
+                o.layout = "mono"
+                resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
+                for frame in src.decode(in_stream):
+                    for rf in resampler.resample(frame):
+                        for pkt in o.encode(rf):
+                            dst.mux(pkt)
+                for rf in resampler.resample(None):
+                    for pkt in o.encode(rf):
+                        dst.mux(pkt)
+                for pkt in o.encode(None):
+                    dst.mux(pkt)
+        data = out.getvalue()
+        return data if len(data) > 100 else None
+    except Exception as e:
+        logger.warning(f"FLAC re-encode skipped: {type(e).__name__}")
+        return None
+
+
+LAST_GROQ_ERROR = ""  # Groq's own error message (never audio/transcript)
 
 
 async def _transcribe_via_groq(audio_bytes: bytes, content_type: str) -> str | None:
     """Returns transcript text, or None to signal fallback to local."""
+    global LAST_GROQ_ERROR
     if not GROQ_API_KEY:
         return None
+    flac = _to_flac_16k_mono(audio_bytes)
+    if flac is not None:
+        upload = ("audio.flac", flac, "audio/flac")
+    else:
+        upload = ("audio.webm", audio_bytes, (content_type or "audio/webm").split(";")[0])
     try:
         import httpx
         async with httpx.AsyncClient(timeout=GROQ_TIMEOUT_S) as client:
             resp = await client.post(
                 GROQ_URL,
                 headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-                files={"file": ("audio.webm", audio_bytes, content_type or "audio/webm")},
+                files={"file": upload},
                 data={"model": GROQ_MODEL, "language": "en",
                       "response_format": "json", "temperature": "0"},
             )
         if resp.status_code != 200:
-            logger.warning(f"Groq STT {resp.status_code} — falling back to local")
+            # Groq's error body is its own message about the request
+            # (format, size, model) — never our transcript. Keep it so the
+            # next failure is diagnosable from the phone via /debug/recent.
+            LAST_GROQ_ERROR = f"{resp.status_code} {upload[0]}: {resp.text[:200]}"
+            logger.warning(f"Groq STT {LAST_GROQ_ERROR} — falling back to local")
             return None
+        LAST_GROQ_ERROR = ""
         return (resp.json().get("text") or "").strip()
     except Exception as e:
-        logger.warning(f"Groq STT {type(e).__name__} — falling back to local")
+        LAST_GROQ_ERROR = f"{type(e).__name__} ({upload[0]})"
+        logger.warning(f"Groq STT {LAST_GROQ_ERROR} — falling back to local")
         return None
 
 

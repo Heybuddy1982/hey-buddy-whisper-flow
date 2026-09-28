@@ -1,22 +1,29 @@
-# Hey Buddy — Whisper STT Server
+# Hey Buddy — Voice server (fallback transcription)
 
-Self-hosted Whisper speech-to-text. Audio is destroyed after transcription.
-No audio stored. No logging of transcript content. Zero retention.
+**Role since 2026-09-28:** fallback only. The app transcribes live with the
+phone's speech service (Android/desktop Chrome). This server is used on iOS,
+or when the phone's speech service fails. See the app repo's DECISIONS.md.
 
-## Environment Variables (set in Railway)
+Path: app → Supabase Edge Function `whisper-proxy` (holds the key) → this server
+`/transcribe` → Groq `whisper-large-v3-turbo` (audio re-encoded to 16 kHz mono
+FLAC in memory) → local faster-whisper `tiny.en` if Groq fails.
 
-| Variable | Description | Default |
-|---|---|---|
-| `WHISPER_MODEL` | Model size: tiny/base/small | `base` |
-| `HB_API_KEY` | Secret key the app sends in `X-Hey-Buddy-Key` header | (empty = no auth) |
-| `ALLOWED_ORIGINS` | Comma-separated CORS origins | `*` |
+Audio is never written to disk. No transcript content is logged.
+
+## Environment variables (Railway)
+
+| Variable | Purpose |
+|---|---|
+| `GROQ_API_KEY` | Enables the fast Groq path. Unset = local only (slow). |
+| `GROQ_STT_MODEL` | Optional. Default `whisper-large-v3-turbo`. |
+| `GROQ_TIMEOUT_S` | Optional. Default `8`. |
+| `HB_API_KEY` | Key the proxy sends in `X-Hey-Buddy-Key`. |
+| `ALLOWED_ORIGINS` | Optional extra CORS origins (known app origins are always allowed). |
+
+`WHISPER_MODEL` is ignored during beta — the model is pinned to `tiny.en` in code.
 
 ## Endpoints
 
-- `GET /health` — health check
-- `POST /transcribe` — transcribe audio file, returns transcript text
-
-## Headers
-
-- `X-Session-ID` — anonymous session ID for logging
-- `X-Hey-Buddy-Key` — API key (required if HB_API_KEY env var is set)
+- `GET /health` — status, model state, server version
+- `GET /debug/recent` — last 30 attempts (metadata only) + `last_groq_error`
+- `POST /transcribe` — multipart `audio`; headers `X-Session-ID`, `X-Hey-Buddy-Key`

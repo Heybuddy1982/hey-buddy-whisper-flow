@@ -51,6 +51,7 @@ KNOWN_ORIGINS = [
     "https://hey-buddy-canada.lovable.app",
     "https://id-preview--4f4cac9c-9c01-4950-acfb-59e79cbb47ac.lovable.app",
     "https://app.heybuddyapp.ca",
+    "https://hey-buddy-activation.vercel.app",  # live app (2026-09); was env-only
     "http://localhost:5173",
 ]
 _env_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
@@ -147,7 +148,7 @@ class TranscriptResponse(BaseModel):
     processing_ms: int = 0
 
 
-SERVER_VERSION = "fw-2026-09-28a"  # bump on every deploy-relevant change
+SERVER_VERSION = "fw-2026-09-28b"  # bump on every deploy-relevant change
 
 
 # ------------------------------------------------------------------
